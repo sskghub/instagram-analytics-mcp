@@ -15,6 +15,7 @@ Smoke test without an MCP client:
 """
 
 import os
+import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -33,13 +34,26 @@ METRICS = "views,reach,saved,shares,total_interactions,ig_reels_avg_watch_time"
 MAX_LIMIT = 50  # ~15s round trip; beyond this the tool call risks timing out
 WORKERS = 12
 
-# Account registry. Add an account by adding a row here plus two keys in .env.
-# key -> (token env var, account id env var, display label)
-ACCOUNTS = {
-    "telugu": ("IG_TELUGU_TOKEN", "IG_TELUGU_ACCOUNT_ID", "Telugu"),
-    "english": ("IG_ENGLISH_TOKEN", "IG_ENGLISH_ACCOUNT_ID", "English / AI"),
-    "entech": ("IG_ENTECH_TOKEN", "IG_ENTECH_ACCOUNT_ID", "English / general tech"),
-}
+
+def discover_accounts():
+    """Accounts are defined in .env, so adding one never means editing this file.
+
+        IG_ACCOUNT_MAIN_TOKEN + IG_ACCOUNT_MAIN_ID  ->  account key "main"
+
+    Names are letters and digits only; an underscore would make the pattern ambiguous.
+    """
+    found = {}
+    for key, token in os.environ.items():
+        m = re.fullmatch(r"IG_ACCOUNT_([A-Z0-9]+)_TOKEN", key)
+        if not m or not token.strip():
+            continue
+        acc_id = (os.getenv(f"IG_ACCOUNT_{m.group(1)}_ID") or "").strip()
+        if acc_id:
+            found[m.group(1).lower()] = (token.strip(), acc_id)
+    return dict(sorted(found.items()))
+
+
+ACCOUNTS = discover_accounts()
 
 # Completion bands, measured on one real account over ~700 reels. Under 15% the reel dies;
 # over 25% it reliably reaches thousands; ~39% was the viral threshold. Calibrate these
@@ -57,18 +71,21 @@ def verdict(pct):
 
 
 def creds(account):
+    if not ACCOUNTS:
+        raise ValueError(
+            "No accounts configured. Add IG_ACCOUNT_<NAME>_TOKEN and IG_ACCOUNT_<NAME>_ID "
+            "to .env. See SETUP.md for how to get them."
+        )
+    account = (account or next(iter(ACCOUNTS))).lower()
     if account not in ACCOUNTS:
-        raise ValueError(f"unknown account {account!r}; use one of {list(ACCOUNTS)}")
-    tok_env, id_env, label = ACCOUNTS[account]
-    token, acc_id = os.getenv(tok_env), os.getenv(id_env)
-    if not token or not acc_id:
-        raise ValueError(f"{tok_env} / {id_env} missing from .env")
-    return token, acc_id, label
+        raise ValueError(f"unknown account {account!r}; configured: {list(ACCOUNTS)}")
+    token, acc_id = ACCOUNTS[account]
+    return token, acc_id, account
 
 
 def fetch_reels(account, limit):
     """One /media call, filtered to reels. Raises a readable error on a dead token."""
-    token, acc_id, label = creds(account)
+    token, acc_id, name = creds(account)
     r = requests.get(
         f"{GRAPH}/{acc_id}/media",
         params={
@@ -80,13 +97,14 @@ def fetch_reels(account, limit):
     ).json()
     if "error" in r:
         raise ValueError(
-            f"Instagram rejected the {label} token: {r['error'].get('message')}. "
+            f"Instagram rejected the {name!r} token: {r['error'].get('message')}. "
             f"Regenerate it in the Meta dashboard under Instagram -> API setup with "
             f"Instagram login -> Generate access tokens, then update "
-            f"{ACCOUNTS[account][0]} in .env. An expired token cannot be refreshed."
+            f"IG_ACCOUNT_{name.upper()}_TOKEN in .env. An expired token cannot be refreshed; "
+            f"see SETUP.md."
         )
     reels = [m for m in r.get("data", []) if m.get("media_product_type") == "REELS"]
-    return reels[:limit], token, label
+    return reels[:limit], token, name
 
 
 def fetch_insights(media_id, token):
@@ -116,7 +134,7 @@ def probe_duration(url):
 def collect(account, limit):
     """Reels enriched with insights and completion rate, newest first."""
     limit = max(1, min(limit, MAX_LIMIT))
-    reels, token, label = fetch_reels(account, limit)
+    reels, token, name = fetch_reels(account, limit)
     with ThreadPoolExecutor(WORKERS) as pool:
         insights = list(pool.map(lambda m: fetch_insights(m["id"], token), reels))
     with ThreadPoolExecutor(WORKERS) as pool:
@@ -138,7 +156,7 @@ def collect(account, limit):
             "hook": (m.get("caption") or "").split("\n")[0][:90],
             "permalink": m.get("permalink"),
         })
-    return rows, label
+    return rows, name
 
 
 def within(rows, days):
@@ -153,7 +171,15 @@ NOTE = ("completion_pct = avg watch time / video duration, the metric that predi
 
 
 @mcp.tool()
-def recent_reels(account: str = "telugu", limit: int = 10) -> dict:
+def list_accounts() -> dict:
+    """Which Instagram accounts are configured. Use first when the user has more than one
+    account, or when an account name in a request is ambiguous or unrecognised."""
+    return {"accounts": list(ACCOUNTS),
+            "default": next(iter(ACCOUNTS)) if ACCOUNTS else None}
+
+
+@mcp.tool()
+def recent_reels(account: str = "", limit: int = 10) -> dict:
     """How recent reels performed. Use when asked how the last few posts did, whether
     something is working, or how a specific recent reel landed.
 
@@ -161,14 +187,15 @@ def recent_reels(account: str = "telugu", limit: int = 10) -> dict:
     Report completion before views: views are the outcome, completion is the cause and is
     readable within hours of posting.
 
-    account is one of the keys in ACCOUNTS. limit is capped at 50.
+    account defaults to the first configured account; call list_accounts to see the names.
+    limit is capped at 50.
     """
-    rows, label = collect(account, limit)
-    return {"account": label, "count": len(rows), "reels": rows, "note": NOTE}
+    rows, name = collect(account, limit)
+    return {"account": name, "count": len(rows), "reels": rows, "note": NOTE}
 
 
 @mcp.tool()
-def top_reels(account: str = "telugu", days: int = 30, scan: int = 30) -> dict:
+def top_reels(account: str = "", days: int = 30, scan: int = 30) -> dict:
     """What actually worked, ranked by completion rate rather than views. Use when asked
     which hooks or topics performed best, what to make more of, or what to repeat.
 
@@ -176,17 +203,17 @@ def top_reels(account: str = "telugu", days: int = 30, scan: int = 30) -> dict:
     completion is the honest hook score. Only reels posted in the last `days` are considered,
     drawn from the most recent `scan` reels (capped at 50).
     """
-    rows, label = collect(account, scan)
+    rows, name = collect(account, scan)
     window = [r for r in within(rows, days) if r["completion_pct"] is not None]
     window.sort(key=lambda r: -r["completion_pct"])
-    return {"account": label, "days": days, "count": len(window),
+    return {"account": name, "days": days, "count": len(window),
             "reels": window, "note": NOTE}
 
 
 @mcp.tool()
 def compare_accounts(days: int = 14, scan: int = 15) -> dict:
     """Side-by-side health of every configured account. Use when asked which account is
-    working, how they compare, or where to put effort next.
+    working, how they compare, or where to put effort next. Only useful with 2+ accounts.
 
     Reports median completion and median views per account over the window, since a single
     outlier reel distorts an average. Different accounts serve different audiences, so
@@ -195,7 +222,7 @@ def compare_accounts(days: int = 14, scan: int = 15) -> dict:
     out = {}
     for key in ACCOUNTS:
         try:
-            rows, label = collect(key, scan)
+            rows, name = collect(key, scan)
         except ValueError as e:
             out[key] = {"error": str(e)}
             continue
@@ -204,7 +231,6 @@ def compare_accounts(days: int = 14, scan: int = 15) -> dict:
         views = [r["views"] for r in window if r["views"] is not None]
         best = max(window, key=lambda r: r["completion_pct"] or 0, default=None)
         out[key] = {
-            "account": label,
             "reels_posted": len(window),
             "median_completion_pct": round(median(comps), 1) if comps else None,
             "median_views": int(median(views)) if views else None,
@@ -216,8 +242,11 @@ def compare_accounts(days: int = 14, scan: int = 15) -> dict:
 
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
-        rows, label = collect("telugu", 3)
-        print(f"{label}: {len(rows)} reels")
+        if not ACCOUNTS:
+            sys.exit("No accounts configured. See SETUP.md.")
+        print(f"configured accounts: {list(ACCOUNTS)}")
+        rows, name = collect("", 3)
+        print(f"\n{name}: {len(rows)} reels")
         for r in rows:
             print(f"  {r['date']}  {r['completion_pct']}%  {r['verdict']}  {r['views']} views")
         sys.exit(0)

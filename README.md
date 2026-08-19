@@ -39,6 +39,7 @@ judgement the API has no opinion about.
 
 | Tool | Answers |
 |---|---|
+| `list_accounts()` | "Which accounts are set up?" |
 | `recent_reels(account, limit)` | "How did my recent posts do?" |
 | `top_reels(account, days, scan)` | "What actually worked?" -- ranked by completion, not views |
 | `compare_accounts(days, scan)` | "Which account is working?" -- median completion per account |
@@ -46,9 +47,17 @@ judgement the API has no opinion about.
 Every reel comes back with date, completion, a `verdict` label, duration, views, reach, saves,
 shares, the caption's first line as the hook, and a permalink.
 
-## Setup
+Works with one account or several. `account` is optional and defaults to the first one you
+configured.
 
-Requires Python 3.10+ and `ffprobe` (`brew install ffmpeg`).
+## Requirements
+
+- An Instagram **Professional** account (Business or Creator). Personal accounts cannot use
+  the Instagram API at all
+- Python 3.10+
+- `ffprobe` (`brew install ffmpeg`) -- without it there is no duration, so no completion rate
+
+## Setup
 
 ```bash
 git clone https://github.com/sskghub/instagram-analytics-mcp
@@ -57,10 +66,26 @@ cd instagram-analytics-mcp
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-cp .env.example .env    # then fill in your tokens
+cp .env.example .env
 ```
 
-Verify before wiring it to anything:
+Then get a token. **[SETUP.md](SETUP.md) is the full walkthrough**, about 15 minutes for the
+first account: create a Meta app, add Instagram, generate a token.
+
+Once a token is in `.env`, this checks everything and tells you the account id to paste back in,
+so you never have to hunt for it:
+
+```bash
+.venv/bin/python check_setup.py
+```
+
+```
+[  OK  ] mcp package installed
+[  OK  ] ffprobe found
+[  OK  ] main: token works, account @yourhandle
+```
+
+Then confirm it pulls real data, and that the MCP layer works end to end:
 
 ```bash
 .venv/bin/python server.py --selftest
@@ -76,7 +101,8 @@ claude mcp add ig-analytics -- /absolute/path/.venv/bin/python /absolute/path/se
 The server reads its own `.env`, so **no credentials go in the MCP config file**. That config
 is committed; tokens are not.
 
-Adding an account is one row in `ACCOUNTS` in [server.py](server.py) plus two keys in `.env`.
+Adding another account means adding two lines to `.env`. There is no code to edit -- accounts
+are discovered from the variable names.
 
 ## Token expiry
 
@@ -91,6 +117,9 @@ python refresh_tokens.py --if-older-than 7
 Run it weekly. The constraint that shapes the design: **an expired token cannot be refreshed.**
 Meta will not renew a dead token, so refreshing early is the only strategy that works. Each
 refresh resets the full 60 days, so early refreshes cost nothing.
+
+Scheduling notes, including the macOS trap where a `launchd` job silently cannot read your
+files, are in [SETUP.md](SETUP.md#keeping-it-working).
 
 It backs up `.env` before writing, rewrites duplicate keys, and alerts on failure.
 

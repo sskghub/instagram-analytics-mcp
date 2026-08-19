@@ -37,9 +37,9 @@ from dotenv import load_dotenv
 SYSTEM = "IG TOKEN REFRESH"
 REFRESH_URL = "https://graph.instagram.com/refresh_access_token"
 
-# A host only needs the accounts it actually serves. A key absent from the target .env is
-# skipped, not treated as a failure, so one script works across machines with different roles.
-TOKEN_KEYS = ["IG_TELUGU_TOKEN", "IG_ENGLISH_TOKEN", "IG_ENTECH_TOKEN"]
+# Token keys are discovered from the target .env, not hardcoded, so this works unchanged
+# on a machine serving one account and a machine serving five.
+TOKEN_KEY_PATTERN = r"^(IG_ACCOUNT_[A-Z0-9]+_TOKEN)="
 
 ENV_FILE = Path(__file__).resolve().parent / ".env"
 STAMP = ENV_FILE.parent / ".ig_token_refresh.stamp"
@@ -117,14 +117,12 @@ def main():
             print(f"refreshed {age:.1f} days ago, skipping")
             return 0
 
-    body = ENV_FILE.read_text()
-    present = {k for k in TOKEN_KEYS if re.search(rf"^{k}=", body, re.M)}
+    token_keys = re.findall(TOKEN_KEY_PATTERN, ENV_FILE.read_text(), re.M)
+    if not token_keys:
+        sys.exit(f"no IG_ACCOUNT_<NAME>_TOKEN keys found in {ENV_FILE}. See SETUP.md.")
 
     updates, failures = {}, []
-    for key in TOKEN_KEYS:
-        if key not in present:
-            print(f"{key}: not on this host, skipping")
-            continue
+    for key in token_keys:
         token = os.getenv(key)
         if not token:
             failures.append(f"{key}: present but empty")

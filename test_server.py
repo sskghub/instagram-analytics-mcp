@@ -31,12 +31,21 @@ async def main():
             tools = await session.list_tools()
             names = [t.name for t in tools.tools]
             print("tools discovered:", names)
-            assert {"recent_reels", "top_reels", "compare_accounts"} <= set(names)
+            assert {"list_accounts", "recent_reels", "top_reels",
+                    "compare_accounts"} <= set(names)
 
-            res = await session.call_tool("recent_reels", {"account": "telugu", "limit": 3})
+            res = await session.call_tool("list_accounts", {})
+            assert not res.is_error, res.content[0].text
+            configured = json.loads(res.content[0].text)
+            print("configured accounts:", configured["accounts"])
+            assert configured["accounts"], "no accounts in .env; see SETUP.md"
+
+            # No account argument must fall back to the default account.
+            res = await session.call_tool("recent_reels", {"limit": 3})
             assert not res.is_error, res.content[0].text
             data = json.loads(res.content[0].text)
-            print(f"\nrecent_reels -> {data['account']}, {data['count']} reels")
+            print(f"\nrecent_reels (default account) -> {data['account']}, "
+                  f"{data['count']} reels")
             for r in data["reels"]:
                 print(f"   {r['date']}  {r['completion_pct']}%  {r['verdict']}")
 
@@ -46,7 +55,7 @@ async def main():
             print("\nbad account -> handled:", res.content[0].text[:70])
 
             # The server must still be usable after that failure.
-            res = await session.call_tool("recent_reels", {"account": "telugu", "limit": 1})
+            res = await session.call_tool("recent_reels", {"limit": 1})
             assert not res.is_error
             print("server alive after error: yes")
 
