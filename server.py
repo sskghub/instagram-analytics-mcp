@@ -26,6 +26,7 @@ from statistics import median
 import requests
 from dotenv import load_dotenv
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 
 load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
@@ -169,8 +170,17 @@ mcp = MCPServer("ig-analytics")
 NOTE = ("completion_pct = avg watch time / video duration, the metric that predicts reach. "
         "verdict bands are audience-specific; see BANDS in server.py.")
 
+# Every tool reads; none of them post, edit or delete. open_world is true because they all
+# call the Instagram Graph API, and ffprobe fetches the video files it returns.
+READ_ONLY = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
 
-@mcp.tool()
+
+@mcp.tool(annotations=READ_ONLY)
 def list_accounts() -> dict:
     """Which Instagram accounts are configured. Use first when the user has more than one
     account, or when an account name in a request is ambiguous or unrecognised."""
@@ -178,7 +188,7 @@ def list_accounts() -> dict:
             "default": next(iter(ACCOUNTS)) if ACCOUNTS else None}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 def recent_reels(account: str = "", limit: int = 10) -> dict:
     """How recent reels performed. Use when asked how the last few posts did, whether
     something is working, or how a specific recent reel landed.
@@ -194,7 +204,7 @@ def recent_reels(account: str = "", limit: int = 10) -> dict:
     return {"account": name, "count": len(rows), "reels": rows, "note": NOTE}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 def top_reels(account: str = "", days: int = 30, scan: int = 30) -> dict:
     """What actually worked, ranked by completion rate rather than views. Use when asked
     which hooks or topics performed best, what to make more of, or what to repeat.
@@ -210,7 +220,7 @@ def top_reels(account: str = "", days: int = 30, scan: int = 30) -> dict:
             "reels": window, "note": NOTE}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 def compare_accounts(days: int = 14, scan: int = 15) -> dict:
     """Side-by-side health of every configured account. Use when asked which account is
     working, how they compare, or where to put effort next. Only useful with 2+ accounts.
